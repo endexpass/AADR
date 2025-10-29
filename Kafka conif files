@@ -1,0 +1,182 @@
+1.	Data Flow:
+
+○	Sensor Pods → Publish raw data to sensor-data Kafka topic.
+○	Kafka Streams (Transformation) → Consume sensor-data, preprocess, and output to processed-data.
+○	Kafka Streams (Symptom Detection) → Consume processed-data, detect symptoms, and output to symptoms-data.
+○	Kafka Streams (Disease Scoring) → Consume symptoms-data, calculate scores, and output to analysis-results.
+○	Storage and Alerts → Downstream services consume analysis-results.
+Deployment in Kubernetes
+Kafka Streams applications can be deployed as separate pods or as part of the processing layer. Example deployment:
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-streams-symptom
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kafka-streams
+  template:
+    metadata:
+      labels:
+        app: kafka-streams
+    spec:
+      containers:
+      - name: kafka-streams-app
+        image: wer-kafka-streams-image:latest
+        env:
+        - name: KAFKA_BROKER
+          value: "kafka-service:9092"
+        - name: INPUT_TOPIC
+          value: "sensor-data"
+        - name: OUTPUT_TOPIC
+          value: "symptoms-data"
+
+Kafka Consumer Implementation in Go
+Creating Kafka consumers to analyze data in real-time or store it for further processing involves the following steps:
+1. Kafka Consumer Implementation in Go
+Here’s a Go-based Kafka consumer that reads messages from the sensor-data topic:
+package main
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/segmentio/kafka-go"
+)
+
+func main() {
+	// Kafka configuration
+	brokers := []string{"localhost:9092"}
+	topic := "sensor-data"
+	groupID := "sensor-data-consumer-group"
+
+	// Create Kafka reader
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:        brokers,
+		GroupID:        groupID,
+		Topic:          topic,
+		MinBytes:       10e3, // 10KB
+		MaxBytes:       10e6, // 10MB
+		CommitInterval: time.Second,
+	})
+
+	// Graceful shutdown handling
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		sigchan := make(chan os.Signal, 1)
+		signal.Notify(sigchan, os.Interrupt, syscall.SIGTERM)
+		<-sigchan
+		fmt.Println("\nShutting down consumer...")
+		cancel()
+	}()
+
+	fmt.Println("Consumer is running. Waiting for messages...")
+
+	// Consume messages
+	for {
+		m, err := reader.ReadMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				break // Context was canceled, exit loop
+			}
+			log.Println("Error reading message:", err)
+			continue
+		}
+		// Process the message
+		fmt.Printf("Received message: %s at offset %d\n", string(m.Value), m.Offset)
+
+		// Example: store data or process further here
+		processMessage(string(m.Value))
+	}
+
+	if err := reader.Close(); err != nil {
+		log.Println("Error closing Kafka reader:", err)
+	}
+	fmt.Println("Consumer stopped.")
+}
+
+// Example function to process data
+func processMessage(message string) {
+	// we can store the data in a database, or analyze it here
+	fmt.Println("Processing message:", message)
+}
+
+
+
+2. Deploying the Consumer
+a. Run Locally
+1.	Save the script in a .go file (e.g., kafka_consumer.go).
+2.	Install dependencies using go mod tidy.
+Run the consumer:
+ go run kafka_consumer.go
+b. Run in Kubernetes
+Create a Dockerfile for the Consumer:
+ FROM golang:1.20-alpine
+WORKDIR /app
+COPY . .
+RUN go mod tidy
+RUN go build -o kafka-consumer .
+ENTRYPOINT ["./kafka-consumer"]
+Build and Push the Image:
+ docker build -t wer-docker-repo/kafka-consumer:latest .
+docker push wer-docker-repo/kafka-consumer:latest
+Deploy to Kubernetes: Create a kafka-consumer-deployment.yaml:
+ apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+    spec:
+      containers:
+      - name: kafka-consumer
+        image: wer-docker-repo/kafka-consumer:latest
+        env:
+        - name: KAFKA_BROKER
+          value: "kafka-broker-service:9092" # Adjust as needed
+        - name: KAFKA_TOPIC
+          value: "sensor-data"
+        - name: KAFKA_GROUP_ID
+          value: "sensor-data-consumer-group"
+ Apply the deployment:
+ kubectl apply -f kafka-consumer-deployment.yaml
+3. Data Storage
+a. Save to a Database
+Modify the processMessage function to store messages in a database (e.g., PostgreSQL or MongoDB).
+Example with PostgreSQL:
+import (
+	"database/sql"
+	_ "github.com/lib/pq"
+)
+
+func storeToPostgres(message string) {
+	connStr := "user=wer_user password=wer_password dbname=wer_db sslmode=disable"
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		log.Println("Database connection error:", err)
+		return
+	}
+	defer db.Close()
+
+	_, err = db.Exec("INSERT INTO sensor_data (message) VALUES ($1)", message)
+	if err != nil {
+		log.Println("Error inserting message:", err)
+	} }
+
+Call storeToPostgres from processMessage:
+func processMessage(message string) {
+	fmt.Println("Processing message:", message)
+	storeToPostgres(message)
+}
